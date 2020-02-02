@@ -1,0 +1,985 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: SaltStack Enterprise Deployment
+Parameters:
+  AppName:
+    Description: "Name for this App"
+    Type: String
+    MinLength: '1'
+    Default: "sse"
+  AppVersion:
+    Description: "Version of Deployment"
+    Type: String
+    MinLength: '1'
+    Default: "6.2.0"
+  S3URL:
+    Description: "S3 URL"
+    Type: String
+    MinLength: '1'
+    Default: "https://blkangl-saltstack.s3.amazonaws.com"
+  S3Bucket:
+    Description: "The S3 bucket used for deployment"
+    Type: String
+    MinLength: '1'
+    Default: "blkangl-saltstack"
+  MasterEc2InstanceSize:
+    Description: "Default instance size for EC2 resources"
+    Type: String
+    MinLength: '1'
+    Default: "m5.large"
+  MinionEc2InstanceSize:
+    Description: "Default instance size for EC2 resources"
+    Type: String
+    MinLength: '1'
+    Default: "m5.large"
+  RaasEc2InstanceSize:
+    Description: "Default instance size for EC2 resources"
+    Type: String
+    MinLength: '1'
+    Default: "m5.large"
+  EC2Key:
+    Description: "SSH Key for EC2 INSTANCE"
+    Type: String
+    MinLength: '1'
+    Default: "saltkey"
+  MinionId:
+    Description: "Name that minion will appear as in RaasServer"
+    Type: String
+    MinLength: '1'
+    Default: "myminion"
+  RaasVersion:
+    Description: Raas version
+    Type: String
+    MinLength: '1'
+    Default: "6.2.0"
+  SaltCrystalZip:
+    Description: "Name of salt crystal package zip"
+    Type: String
+    MinLength: '1'
+    Default: "SaltStack_Enterprise-6.2.0_1-prerelease_Installer.zip"
+  SaltCrystalFolder:
+    Description: "Name of salt crystal package folder"
+    Type: String
+    MinLength: '1'
+    Default: "sse-installer"
+  RaasPluginFolder:
+    Description: "Folder path inside salt crystal package for plugins"
+    Type: String
+    MinLength: '1'
+    Default: "salt/sse/eapi_plugin"
+  RaasPlugin:
+    Description: "Name of plugin .whl file in S3 (no + chars)"
+    Type: String
+    MinLength: '1'
+    Default: "SSEAPE-6.2.0_1-prerelease-py2.py3-none-any.whl"
+  RaasPluginName:
+    Description: "Name of .whl file for processing"
+    Type: String
+    MinLength: '1'
+    Default: "SSEAPE-6.2.0+1-prerelease-py2.py3-none-any.whl"
+  RedisToken:
+    NoEcho: true
+    Description: "Redis encryption token"
+    Type: String
+    MinLength: '8'
+    Default: "myraasredisencryptionkey"
+  DBName:
+    Description: Name of DB
+    Type: String
+    Default: "raas_43cab1f4de604ab185b51d883c5c5d09"
+  DBInstanceName:
+    Description: Name of DB Instance
+    Type: String
+    MinLength: '1'
+    Default: "raasDB"
+  DBInstancePort:
+    Description: Aurora database port number
+    Type: String
+    Default: "5432"
+  SaltRoot:
+    NoEcho: true
+    Description: Salt RaaS Root password
+    Type: String
+    MinLength: '16'
+    Default: "saltstackenterprise"
+  License:
+    Description: License file name
+    Type: String
+    MinLength: '1'
+    Default: "raas.license"
+  AMI:
+    Description: "AMI to use"
+    Type: String
+    MinLength: '1'
+    Default: "ami-09d069a04349dc3cb"  # "ami-0c322300a1dd5dc79"
+  DBMasterUsername:
+    Description: "DB Username"
+    Type: String
+    MinLength: '4'
+    Default: "salt"
+  DBMasterPassword:
+    Description: "DB Password"
+    Type: String
+    MinLength: '8'
+    Default: "mydbpassword123"
+
+Conditions:
+  AwsRegionUsEast1: !Equals [!Ref 'AWS::Region', 'us-east-1']
+
+Resources:
+## General Network Resources
+  # Create Internet Gateway for Public IP connectivity
+  IG:
+    Type: AWS::EC2::InternetGateway
+
+  # Create VPC to use for this stack
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.1.0.0/16"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+
+  # Attach our Internet Gateway to our VPC
+  IGAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: IG
+      VpcId:
+        Ref: VPC
+
+  # Create a route table for our VPC
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+
+  # Add a route to the routing table for public access to public IP
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId:
+        Ref: IG
+      RouteTableId:
+        Ref: RouteTable
+
+  # Subnet for AvailabilityZone A
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - VPC
+    Properties:
+      AvailabilityZone: "us-east-1a"
+      CidrBlock: "10.1.1.0/24"
+      VpcId:
+        Ref: VPC
+
+  # Subnet for AvailabilityZone B
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - VPC
+    Properties:
+      AvailabilityZone: "us-east-1b"
+      CidrBlock: "10.1.2.0/24"
+      VpcId:
+        Ref: VPC
+
+  # Associate Subnet A with our Routing Table
+  SubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      SubnetId:
+        Ref: SubnetA
+
+  # Associate Subnet B with our Routing Table
+  SubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      SubnetId:
+        Ref: SubnetB
+
+
+## Database Resources
+  RDSDBParameterGroup:
+    Properties:
+      Description: "CloudFormation Parameter Group"
+      Family: postgres9.6
+      Parameters:
+        rds.force_ssl: 'true'
+    Type: "AWS::RDS::DBParameterGroup"
+
+  DBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    DependsOn:
+      - SubnetA
+      - SubnetB
+    Properties:
+      DBSubnetGroupDescription: Subnets available for the RDS DB Instance
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+
+  DBInstance:
+    Type: 'AWS::RDS::DBInstance'
+    DependsOn:
+      - RDSDBParameterGroup
+      - DBSubnetGroup
+    DeletionPolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: '9.6.15'
+      AllocatedStorage: '20'
+      StorageType: gp2
+      StorageEncrypted: 'true'
+      DBInstanceClass: db.m3.medium
+      MultiAZ: 'false'
+      PubliclyAccessible: 'false'
+      AutoMinorVersionUpgrade: 'true'
+      AllowMajorVersionUpgrade: 'false'
+      PreferredMaintenanceWindow: 'sun:20:00-sun:21:00'
+      PreferredBackupWindow: '01:00-02:00'
+      BackupRetentionPeriod: '30'
+      DBParameterGroupName: !Ref RDSDBParameterGroup
+      DBInstanceIdentifier: !Ref DBInstanceName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Port: !Ref DBInstancePort
+      DBName: !Ref DBName
+      MasterUsername: !Join [ '', [ a, Ref: DBMasterUsername ] ]
+      MasterUserPassword:
+        Ref: DBMasterPassword
+      VPCSecurityGroups:
+        - Ref: SaltStackInternalGroup
+      CopyTagsToSnapshot: 'true'
+
+
+## Services Resources
+# IAM Resources
+  # IAM Role
+  RaasRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      RoleName: "RaasRole"
+      Policies:
+      - PolicyName: InstancePolicy
+        PolicyDocument:
+          Statement:
+          - Action: s3:List*
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: S3Bucket
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: S3Bucket
+                - "/*"
+
+#####
+# Security Groups
+  # Allow All Access Between Nodes in Salt Deployment
+  SaltStackInternalGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: saltstack-sg-enterprise
+      GroupDescription: Security group for SaltStack Enterprise Redis
+      VpcId:
+        Ref: VPC
+  SaltStackInternalGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn:
+      - SaltStackInternalGroup
+    Properties:
+      GroupId:
+        Ref: SaltStackInternalGroup
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId:
+        Ref: SaltStackInternalGroup
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName:
+        Fn::Sub: "${AWS::StackName}-sg-raas"
+      GroupDescription: Security group for SaltStack Enterprise
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: 0.0.0.0/0
+      VpcId:
+        Ref: VPC
+
+#####
+# ElastiCache Redis
+  ESubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: "Cache Subnet Group"
+      SubnetIds:
+        - Ref: SubnetA
+        - Ref: SubnetB
+  MyElastiCache:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      AtRestEncryptionEnabled: true
+      AuthToken: !Ref RedisToken
+      AutomaticFailoverEnabled: true
+      CacheNodeType: cache.m3.medium
+      CacheSubnetGroupName: !Ref ESubnetGroup
+      Engine: redis
+      NumCacheClusters: 2
+      ReplicationGroupDescription: 'Redis for SaltStack'
+      ReplicationGroupId:
+        Fn::Join:
+          - ''
+          - - "saltstack-redis"
+      SecurityGroupIds:
+        - Ref: SaltStackInternalGroup
+      TransitEncryptionEnabled: true
+
+
+## RaaS Node Resources
+#####
+# EC2 Network Interface
+  WebNodeNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    DependsOn:
+      - SubnetA
+    Properties:
+      Description: String
+      GroupSet:
+        - Ref: WebSecurityGroup
+        - Ref: SaltStackInternalGroup
+      SubnetId:
+        Ref: SubnetA
+
+#####
+# EC2 Instance Definition - RaaS Web Node
+  WebNode:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - WebNodeNetworkInterface
+      - DBInstance
+      - MyElastiCache
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT30M
+    Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: "S3"
+          buckets:
+            - Ref: S3Bucket
+          roleName:
+            Ref: RaasRole
+
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/home/ec2-user/sse-installer.zip":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - Ref: RaasVersion
+                  - Ref: SaltCrystalZip
+              authentication: S3AccessCreds
+
+
+            "/home/ec2-user/python35u-libs-3.5.4-1.ius.el7.x86_64.rpm":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - "python"
+                  - "python35u-libs-3.5.4-1.ius.el7.x86_64.rpm"
+              authentication: S3AccessCreds
+
+            "/home/ec2-user/python35u-3.5.4-1.ius.el7.x86_64.rpm":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - "python"
+                  - "python35u-3.5.4-1.ius.el7.x86_64.rpm"
+              authentication: S3AccessCreds
+
+            "/home/ec2-user/raas.license":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - Ref: License
+              authentication: S3AccessCreds
+              mode: '000400'
+
+            "/home/ec2-user/raas.conf":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "customer_id: 43cab1f4-de60-4ab1-85b5-1d883c5c5d09"
+                  - "tls_minimum: 1.2"
+                  - "tls_crt: /etc/pki/raas/certs/localhost.crt"
+                  - "tls_key: /etc/pki/raas/certs/localhost.key"
+                  - "port: 443"
+                  - "sql:"
+                  - "  dialect: postgresql"
+                  - !Join
+                    - ''
+                    - - '  username: '
+                      - !Join [ '', [ a, Ref DBMasterUsername ] ]
+                  - !Join
+                    - ''
+                    - - '  password: '
+                      - Ref: DBMasterPassword
+                  - !Join
+                    - ''
+                    - - '  host: '
+                      - !GetAtt
+                        - DBInstance
+                        - Endpoint.Address
+                  - "  ssl: True"
+                  - "  port: 5432"
+                  - "  driver: psycopg2"
+                  - "background_workers:"
+                  - "  combined_process: True"
+                  - "  max_tasks: 100000"
+                  - "  max_memory: 1048576"
+                  - "redis:"
+                  - !Join
+                    - ''
+                    - - '  url: redis://salty:'
+                      - !Ref RedisToken
+                      - '@localhost:6379'
+                  - "raas_presence_expiration: 3600"
+                  - "tornado_xsrf_cookies_enabled: True"
+                  - "audit:"
+                  - "  enabled: true"
+                  - "  valid_logins: false"
+                  - "sec:"
+                  - "  ingest_override: true"
+                  - "  locke_dir: locke"
+                  - "  post_ingest_cleanup: true"
+                  - "  username: 'secops'"
+                  - "  content_url: 'https://enterprise.saltstack.com/secops_downloads'"
+                  - "  download_enabled: true"
+                  - "  download_frequency: 86400"
+                  - "  stats_snapshot_interval: 3600"
+                  - "  compile_stats_interval: 10"
+                  - "  ingest_on_boot: true"
+                  - "  content_lock_timeout: 60"
+                  - "  content_lock_block_timeout: 120"
+                  - "proxy:"
+                  - "  monitored: True"
+                  - "  tgt: 'deltaproxy*'"
+                  - "  tgt_type: glob"
+                  - "  monitor_interval: 10"
+                  - "  rebalance_interval: 20"
+                  - "  proxies:"
+                  - "    - perimetercontrolproxy1"
+                  - "vman:"
+                  - "  vman_dir: vman                        # Location where SaltStack content in expanded before ingestion. If the path is relative (no leading slash), then it is relative to the RAAS cache dir (ENV Var: SSE_VMAN_DIR)"
+                  - "  download_enabled: true                # If True, SaltStack content downloading is enabled. (should be False for air gapped systems) (ENV Var: SSE_VMAN_DOWNLOAD_ENABLED)"
+                  - "  download_frequency: 86400             # The frequency in seconds of automated SaltStack Vulnerability Management content downloads and ingestion. (ENV Var: SSE_VMAN_DOWNLOAD_FREQUENCY)"
+                  - "  username: vman                        # Username used to log in to enterprise.saltstack.com to get content (ENV Var: SSE_VMAN_USERNAME)"
+                  - "  content_url: 'https://enterprise.saltstack.com/vman_downloads' # URL from which SaltStack Vulnerability Management content will be downloaded. (ENV Var: SSE_VMAN_CONTENT_URL)"
+                  - "  ingest_on_boot: true                  # If True, SaltStack Vulnerability Management content will be downloaded and ingested soon after RAAS boot (ENV Var: SSE_VMAN_INGEST_ON_BOOT)"
+                  - "  compile_stats_interval: 60            # Interval in seconds between times that the compile stats will be gathered. (ENV Var: SSE_VMAN_COMPILE_STATS_INTERVAL)"
+                  - "  stats_snapshot_interval: 3600         # Interval in seconds between when stats for VMan will be gathered (ENV Var: SSE_VMAN_STATS_SNAPSHOT_INTERVAL)"
+                  - "  old_policy_file_lifespan: 2           # The lifespan of old policy files in days that will remain in the RAAS file system"
+                  - "  delete_old_policy_files_interval: 86400 # The interval in seconds between times that theold vman policy files in the RAAS file system will be deleted"
+              mode: '000400'
+
+            "/home/ec2-user/master.d-raas":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "# Master name in raas"
+                  - "id: raas_master"
+                  - "#sseapi_cluster_id: salt"
+                  - "sseapi_failover_master: False"
+                  - "engines:"
+                  - "  - sseapi: {}"
+                  - "  - jobcompletion: {}"
+                  - "master_job_cache: sseapi"
+                  - "event_return: sseapi"
+                  - "sseapi_server: https://localhost"
+                  - "sseapi_validate_cert: False"
+                  - "sseapi_poll_interval: 10"
+                  - "sseapi_request_timeout: 60"
+                  - "sseapi_update_interval: 60"
+                  - "fileserver_backend:"
+                  - "  - sseapi"
+                  - "  - roots"
+                  - "ext_pillar:"
+                  - "  - sseapi: {}"
+
+            "/home/ec2-user/stunnel.conf":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "fips = no"
+                  - "setuid = root"
+                  - "setgid = root"
+                  - "pid = /var/run/stunnel.pid"
+                  - "debug = 7"
+                  - "delay = yes"
+                  - "options = NO_SSLv2"
+                  - "options = NO_SSLv3"
+                  - "[raas]"
+                  - "   client = yes"
+                  - "   accept = 127.0.0.1:6379"
+                  - !Join
+                    - ''
+                    - - '   connect = '
+                      - Fn::GetAtt:
+                        - MyElastiCache
+                        - PrimaryEndPoint.Address
+                      - ':'
+                      - Fn::GetAtt:
+                        - MyElastiCache
+                        - PrimaryEndPoint.Port
+              mode: '000400'
+
+            "/home/ec2-user/stunnel.sh":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "stunnel /etc/stunnel/stunnel.conf"
+                  - "while :"
+                  - "do"
+                  - "echo 'Looping...';"
+                  - "sleep 300;"
+                  - "done"
+              mode: "000750"
+
+            "/home/ec2-user/stunnel.service":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "[Unit]"
+                  - "Description=Start stunnel"
+                  - ""
+                  - "[Service]"
+                  - "Type=simple"
+                  - "ExecStart=/bin/bash /usr/bin/stunnel.sh"
+                  - ""
+                  - "[Install]"
+                  - "WantedBy=multi-user.target"
+              mode: '000440'
+
+            "/home/ec2-user/setup.sh":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "#!/bin/bash"
+                  - "sudo timedatectl set-timezone UTC"
+                  - "sudo yum install -y psql"
+                  - "sudo yum install -y /home/ec2-user/python35u-libs-3.5.4-1.ius.el7.x86_64.rpm /home/ec2-user/python35u-3.5.4-1.ius.el7.x86_64.rpm"
+                  - "unzip /home/ec2-user/sse-installer.zip"
+                  - !Join
+                    - ''
+                    - - "cd "
+                      - !Ref SaltCrystalFolder
+                      - " && sudo ./setup_single_node.sh" #TODO - Update to just deploy the RaaS Webserver component and Minion component
+                  - "# Install pgcrypto on Postgres DB"
+                  - !Join
+                    - ''
+                    - - "export PGPASSWORD="
+                      - Ref: DBMasterPassword
+                  - !Join
+                    - ''
+                    - - "psql -h "
+                      - !GetAtt
+                        - DBInstance
+                        - Endpoint.Address
+                      - " -U "
+                      - !Join [ '', [ a, Ref: DBMasterUsername ] ]
+                      - " -d raas_43cab1f4de604ab185b51d883c5c5d09 -c 'CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";' "
+                  - ""
+                  - "# Backup Configs"
+                  - "cp /etc/raas/pki/.raas.key /home/ec2-user/.raas.key-bkp"
+                  - "cp /etc/raas/raas /etc/raas/raas.bkp"
+                  - "cp /etc/salt/master.d/raas.conf /home/ec2-user/master.d-raas-bkp"
+                  - ""
+                  - "# Move predefined configs in place"
+                  - "cp /home/ec2-user/raas.conf /etc/raas/raas"
+                  - "cp /home/ec2-user/raas.license /etc/raas/raas.license"
+                  - "cp /home/ec2-user/master.d-raas /etc/salt/master.d/raas.conf"
+                  - "chown raas:raas /etc/raas/raas.license"
+                  - "chmod 400 /etc/raas/raas.license"
+                  - "chown raas /etc/raas/raas"
+                  - ""
+                  - "# Restart RaaS for configs to take effect. Sleep 30 seconds to allow startup"
+                  - "systemctl restart raas"
+                  - "sleep 30"
+                  - ""
+                  - "# Stop all unneccessary services"
+                  - "systemctl disable postgresql-9.6"
+                  - "systemctl stop postgresql-9.6"
+                  - "systemctl disable redis"
+                  - "systemctl stop redis"
+                  - ""
+                  - "# Configure secure tunnel for Redis access"
+                  - "yum install -y stunnel"
+                  - "cp /home/ec2-user/stunnel.conf /etc/stunnel/."
+                  - "cp /home/ec2-user/stunnel.sh /usr/bin/stunnel.sh"
+                  - "chmod +x /usr/bin/stunnel.sh"
+                  - "cp /home/ec2-user/stunnel.service /etc/systemd/system/stunnel.service"
+                  - "chmod 644 /etc/systemd/system/stunnel.service"
+                  - "systemctl enable stunnel"
+                  - "systemctl start stunnel"
+                  - ""
+                  - "# Move new DB credential file - credentials are in raas configationf for now"
+                  - "mv /etc/raas/raas.secconf /etc/raas/raas.secconf-bkp"
+                  - ""
+                  - "# Restart RAAS"
+                  - "systemctl restart raas"
+                  - "sleep 30"
+                  - "systemctl restart salt-master"
+                  - "systemctl restart salt-minion"
+              mode: "000755"
+
+          commands:
+            1_bootstrap:
+              command:
+                Fn::Join:
+                - "\n"
+                - - "!/bin/bash -ex"
+                  - "#sudo /home/ec2-user/setup.sh"
+                  - "#sudo systemctl start raas"
+
+    Properties:
+      InstanceType:
+        Ref: RaasEc2InstanceSize
+      EbsOptimized: 'true'
+      KeyName:
+        Ref: EC2Key
+      ImageId:
+        Ref: AMI
+      Monitoring: 'true'
+      NetworkInterfaces:
+        - NetworkInterfaceId:
+            Ref: WebNodeNetworkInterface
+          DeviceIndex: '0'
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -ex\n"
+            - "echo This is the SaltStack Enterprise Node\n"
+            - "/opt/aws/bin/cfn-init -v --stack "
+            - Ref: AWS::StackName
+            - " --resource WebNode --region "
+            - Ref: AWS::Region
+            - "\n"
+            - "#/opt/aws/bin/cfn-signal -e $? --stack "
+            - Ref: AWS::StackName
+            - " --resource WebNode --region "
+            - Ref: AWS::Region
+            - "/opt/aws/bin/cfn-signal -e 0 --stack "
+            - Ref: AWS::StackName
+            - " --resource WebNode --region "
+            - Ref: AWS::Region
+            - "\n"
+            - "echo 'Version: "
+            - !Ref AppVersion
+            - "'"
+
+  EIPExternalIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      InstanceId:
+        Ref: WebNode
+      Domain: "vpc"
+
+## Master Resources
+
+# EC2 Network Interface
+  MasterNodeNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    DependsOn:
+      - SubnetA
+    Properties:
+      Description: String
+      GroupSet:
+        - Ref: WebSecurityGroup
+        - Ref: SaltStackInternalGroup
+      SubnetId:
+        Ref: SubnetA
+
+# EC2 Instance Definition - RaaS Web Node
+  MasterNode:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - MasterNodeNetworkInterface
+      - WebNode
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT30M
+    Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: "S3"
+          buckets:
+            - Ref: S3Bucket
+          roleName:
+            Ref: RaasRole
+
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/home/ec2-user/sse-installer.zip":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - Ref: RaasVersion
+                  - Ref: SaltCrystalZip
+
+            "/home/ec2-user/eapi_plugin.whl":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - Ref: RaasVersion
+                  - Ref: RaasPlugin
+
+            "/home/ec2-user/python35u-libs-3.5.4-1.ius.el7.x86_64.rpm":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - "python"
+                  - "python35u-libs-3.5.4-1.ius.el7.x86_64.rpm"
+              authentication: S3AccessCreds
+
+            "/home/ec2-user/python35u-3.5.4-1.ius.el7.x86_64.rpm":
+              source:
+                Fn::Join:
+                - "/"
+                - - Ref: S3URL
+                  - "s3-saltstack-enterprise"
+                  - "python"
+                  - "python35u-3.5.4-1.ius.el7.x86_64.rpm"
+              authentication: S3AccessCreds
+
+
+            "/home/ec2-user/raas.conf":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "# SaltStack RAAS Configuration"
+                  - "id: aws_saltmaster"
+                  - "sseapi_failover_master: False"
+                  - "engines:"
+                  - "  - sseapi: {}"
+                  - "  - jobcompletion: {}"
+                  - "master_job_cache: sseapi"
+                  - "event_return: sseapi"
+                  - !Join
+                    - ''
+                    - - "sseapi_server: https://"
+                      - Fn::GetAtt:
+                        - WebNodeNetworkInterface
+                        - PrimaryPrivateIpAddress
+                  - "sseapi_validate_cert: False"
+                  - "sseapi_force_restful: True"
+                  - "sseapi_poll_interval: 10"
+                  - "sseapi_request_timeout: 60"
+                  - "sseapi_update_interval: 60"
+                  - "fileserver_backend:"
+                  - "  - sseapi"
+                  - "  - roots"
+                  - "ext_pillar:"
+                  - "  - sseapi: {}"
+                  - "reactor:"
+                  - "  - 'deltaproxy/start':"
+                  - "    - /srv/reactor/deltaproxykeys.sls"
+
+            "/home/ec2-user/deltaproxykeys.sls":
+              content:
+                Fn::Join:
+                  - "\n"
+                  - - "Update Deltaproxy Keys:"
+                    - "  runner.deltaproxykeys.update:"
+                    - "    - args:"
+                    - "      - id: {{ data['id'] }}"
+
+            "/home/ec2-user/setup.sh":
+              content:
+                Fn::Join:
+                - "\n"
+                - - "curl -L https://bootstrap.saltstack.com -o /home/ec2-user/install_salt.sh"
+                  - "sh /home/ec2-user/install_salt.sh -P -M"
+                  - "mkdir -p /etc/salt/master.d"
+                  - "sudo yum install -y /home/ec2-user/python35u-libs-3.5.4-1.ius.el7.x86_64.rpm /home/ec2-user/python35u-3.5.4-1.ius.el7.x86_64.rpm"
+                  - "pip3 install psutil"
+                  - !Join
+                    - ""
+                    - - "mv /home/ec2-user/eapi_plugin.whl /home/ec2-user/"
+                      - Ref: RaasPluginName
+                  - !Join
+                    - ""
+                    - - "pip3 install /home/ec2-user/"
+                      - Ref: RaasPluginName
+                  - "cp /home/ec2-user/raas.conf /etc/salt/master.d/."
+                  - !Join
+                    - ''
+                    - - 'sed -i s/#id:/id:\ '
+                      - !Ref MinionId
+                      - '/g /etc/salt/minion'
+                  - 'sed -i s/#master:\ salt/master:\ 127.0.0.1/g /etc/salt/minion'
+                  - "mkdir -p /srv/reactor"
+                  - "cp /home/ec2-user/deltaproxykeys.sls /srv/reactor/deltaproxykeys.sls"
+                  - "systemctl enable salt-master"
+                  - "systemctl enable salt-minion"
+                  - "systemctl restart salt-master"
+                  - "systemctl restart salt-minion"
+              mode: "000755"
+
+          commands:
+            1_bootstrap:
+              command:
+                Fn::Join:
+                - "\n"
+                - - "#!/bin/bash -ex"
+                  - "sudo timedatectl set-timezone UTC"
+                  - "sudo /home/ec2-user/setup.sh"
+
+    Properties:
+      InstanceType:
+        Ref: MasterEc2InstanceSize
+      EbsOptimized: 'true'
+      KeyName:
+        Ref: EC2Key
+      ImageId:
+        Ref: AMI
+      Monitoring: 'true'
+      NetworkInterfaces:
+        - NetworkInterfaceId:
+            Ref: MasterNodeNetworkInterface
+          DeviceIndex: '0'
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -ex\n"
+            - "echo This is the SaltStack Enterprise Node\n"
+            - "/opt/aws/bin/cfn-init -v --stack "
+            - Ref: AWS::StackName
+            - " --resource MasterNode --region "
+            - Ref: AWS::Region
+            - "\n"
+            - "/opt/aws/bin/cfn-signal -e $? --stack "
+            - Ref: AWS::StackName
+            - " --resource MasterNode --region "
+            - Ref: AWS::Region
+            - "\n"
+            - "echo 'Version: "
+            - !Ref AppVersion
+            - "'"
+
+
+## Minion Resources
+
+
+#####
+# Outputs
+Outputs:
+  WebNodeIP:
+    Description: The IP associated with the WebNode
+    Value:
+      Fn::GetAtt:
+        - WebNodeNetworkInterface
+        - PrimaryPrivateIpAddress
+  RdsDBHost:
+    Description: RDS Host Name
+    Value: !GetAtt
+      - DBInstance
+      - Endpoint.Address
+  RdsDBPort:
+    Description: RDS Instance Port Number
+    Value: !GetAtt
+      - DBInstance
+      - Endpoint.Port
+  RdsEndpoint:
+    Description: Full RDS Endpoint TCP URL
+    Value: !Join
+      - ''
+      - - tcp(
+        - !GetAtt
+          - DBInstance
+          - Endpoint.Address
+        - ':'
+        - !GetAtt
+          - DBInstance
+          - Endpoint.Port
+        - )/
+  RdsDBUsername:
+    Description: RDS Username (Random)
+    Value: !Join [ '', [ a, Ref: DBMasterUsername ] ]
+  RedisPrimaryEndpoint:
+    Description: "Primary Endpoint Address for Redis"
+    Value:
+      Fn::GetAtt:
+      - MyElastiCache
+      - PrimaryEndPoint.Address
+  RedisPrimaryPort:
+    Description: "Primary Endpoint Port for Redis"
+    Value:
+      Fn::GetAtt:
+      - MyElastiCache
+      - PrimaryEndPoint.Port
+  SshSecurityGroup:
+    Description: "Allow inbound SSH from internal sources"
+    Value:
+      Fn::GetAtt:
+      - SaltStackInternalGroup
+      - GroupId
+  WebSecurityGroup:
+    Description: "Allow inbound HTTPS from internal sources"
+    Value:
+      Fn::GetAtt:
+      - WebSecurityGroup
+      - GroupId
+  MasterNodeIP:
+    Description: The IP associated with the MasterNode
+    Value:
+      Fn::GetAtt:
+        - MasterNodeNetworkInterface
+        - PrimaryPrivateIpAddress
