@@ -15,7 +15,7 @@ Parameters:
     Description: "S3 URL"
     Type: String
     MinLength: '1'
-    Default: "https://blkangl-saltstack.s3.amazonaws.com"
+    Default: "https://blkangl-saltstack.s3.amazonaws.com/"
   S3Bucket:
     Description: "The S3 bucket used for deployment"
     Type: String
@@ -127,10 +127,6 @@ Conditions:
 
 Resources:
 ## General Network Resources
-  # Create Internet Gateway for Public IP connectivity
-  IG:
-    Type: AWS::EC2::InternetGateway
-
   # Create VPC to use for this stack
   VPC:
     Type: AWS::EC2::VPC
@@ -138,6 +134,10 @@ Resources:
       CidrBlock: "10.1.0.0/16"
       EnableDnsHostnames: true
       EnableDnsSupport: true
+
+  # Create Internet Gateway for Public IP connectivity
+  IG:
+    Type: AWS::EC2::InternetGateway
 
   # Attach our Internet Gateway to our VPC
   IGAttach:
@@ -147,6 +147,22 @@ Resources:
         Ref: IG
       VpcId:
         Ref: VPC
+
+#  EIP:
+#     DependsOn: IGAttach
+#     Type: AWS::EC2::EIP
+#     Properties:
+#        Domain: vpc
+
+#  NAT:
+#     Type: AWS::EC2::NatGateway
+#     Properties:
+#        AllocationId:
+#           Fn::GetAtt:
+#           - EIP
+#           - AllocationId
+#        SubnetId:
+#           Ref: SubnetA
 
   # Create a route table for our VPC
   RouteTable:
@@ -204,7 +220,6 @@ Resources:
         Ref: RouteTable
       SubnetId:
         Ref: SubnetB
-
 
 ## Database Resources
   RDSDBParameterGroup:
@@ -295,6 +310,14 @@ Resources:
               - - 'arn:aws:s3:::'
                 - Ref: S3Bucket
                 - "/*"
+
+  # IAM Profile to apply the RaasRole IAM Role to an EC2 Instance
+  RaasProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: "RaasRole"
 
 #####
 # Security Groups
@@ -688,6 +711,8 @@ Resources:
         Ref: EC2Key
       ImageId:
         Ref: AMI
+      IamInstanceProfile:
+        Ref: RaasProfile
       Monitoring: 'true'
       NetworkInterfaces:
         - NetworkInterfaceId:
@@ -889,6 +914,8 @@ Resources:
         Ref: EC2Key
       ImageId:
         Ref: AMI
+      IamInstanceProfile:
+        Ref: RaasProfile
       Monitoring: 'true'
       NetworkInterfaces:
         - NetworkInterfaceId:
